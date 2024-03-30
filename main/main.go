@@ -1,14 +1,13 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/fanyeke/minirpc"
-	"github.com/fanyeke/minirpc/codec"
 )
 
 func startServer(addr chan string) {
@@ -23,33 +22,27 @@ func startServer(addr chan string) {
 }
 
 func main() {
-	// 创建一个 string 类型的管道
+	log.SetFlags(0) // 输出的日志不包括日期时间等信息
 	addr := make(chan string)
-	// 启动服务端
-	go startServer(addr)
+	go startServer(addr) // 运行服务器
 
-	// 链接从管道中拿到的地址
-	conn, _ := net.Dial("tcp", <-addr)
-	defer func() { _ = conn.Close() }()
-
+	client, _ := minirpc.Dial("tcp", <-addr) // 开启链接
+	defer func() { _ = client.Close() }()    // 关闭链接
 	time.Sleep(time.Second)
 
-	// 解码默认的编码方式 `Option`
-	_ = json.NewEncoder(conn).Encode(minirpc.DefaultOption)
-	cc := codec.NewGobCodec(conn)
-
+	var wg sync.WaitGroup
 	for i := 0; i < 5; i++ {
-		h := &codec.Header{
-			ServiceMethod: "Foo.Sum",
-			Seq:           uint64(i),
-		}
-		// 发送请求
-		_ = cc.Write(h, fmt.Sprintf("minirpc req %d", h.Seq))
-		// 接受请求
-		_ = cc.ReadHeader(h)
-		var reply string
-		_ = cc.ReadBody(&reply)
-		// 打印结果
-		log.Println("reply:", reply)
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			args := fmt.Sprintf("minirpc req %d", i)
+			var reply string
+			// 发送一个请求, 这个请求的方法是 `Foo.Sum`, 参数是 `args`, 返回将被写入 `reply`
+			if err := client.Call("Foo.Sum", args, &reply); err != nil {
+				log.Fatal("call Foo.sum errpr:", err)
+			}
+			log.Println("reply:", reply)
+		}(i)
 	}
+	wg.Wait()
 }
