@@ -2,11 +2,12 @@ package minirpc
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"log"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
 
 	"github.com/fanyeke/minirpc/codec"
@@ -32,6 +33,42 @@ var DefaultOption = &Option{
 }
 
 type Server struct {
+	serviceMap sync.Map
+}
+
+func (server *Server) Register(rcvr interface{}) error {
+	s := newService(rcvr)
+	if _, dup := server.serviceMap.LoadOrStore(s.name, s); dup {
+		return errors.New("rpc: service already defined: " + s.name)
+	}
+	return nil
+}
+
+func Register(rcvr interface{}) error {
+	return DefaultServer.Register(rcvr)
+}
+
+func (server *Server) findService(serviceMethod string) (svc *service, mtype *methodType, err error) {
+	dot := strings.LastIndex(serviceMethod, ".") // 获得函数的名称下标
+	if dot < 0 {                                 // 如果传入serviceMethod不合法写回错误
+		err = errors.New("rpc server: service/method request ill-formed: " + serviceMethod)
+		return
+	}
+	// 记录请求函数的 包名 和 方法名
+	serviceName, methodName := serviceMethod[:dot], serviceMethod[dot+1:]
+	svci, ok := server.serviceMap.Load(serviceName) // 获得 `serviceMap` 中存储的值
+	if !ok {
+		err = errors.New("rpc server: can't find service " + serviceName)
+		return
+	}
+	// 断言为 service 类型
+	svc = svci.(*service)
+	// 从 service 中获取到方法
+	mtype = svc.method[methodName]
+	if mtype == nil {
+		err = errors.New("rpc server: can't find method " + methodName)
+	}
+	return
 }
 
 func NewServer() *Server {
@@ -123,6 +160,8 @@ func (server *Server) serverCodec(cc codec.Codec) {
 type request struct {
 	h            *codec.Header
 	argv, replyv reflect.Value
+	mtype        *methodType
+	svc          *service
 }
 
 // readRequestHeader 读取请求 `Header`
@@ -144,11 +183,20 @@ func (server *Server) readRequest(cc codec.Codec) (*request, error) {
 		return nil, err
 	}
 	req := &request{h: h}
-	// TODO: 不知道请求的argv
-
-	req.argv = reflect.New(reflect.TypeOf(""))
-	if err = cc.ReadBody(req.argv.Interface()); err != nil {
+	req.svc, req.mtype, err = server.findService(h.ServiceMethod)
+	if err != nil {
+		return req, err
+	}
+	// 使用之前要先初始化, 创建出入参实例
+	req.argv = req.mtype.newArgv()
+	req.replyv = req.mtype.newReplyv()
+	argvi := req.argv.Interface()
+	if req.argv.Type().Kind() != reflect.Ptr {
+		argvi = req.argv.Addr().Interface()
+	}
+	if err = cc.ReadBody(argvi); err != nil {
 		log.Println("rpc server: read argv err: ", err)
+		return req, err
 	}
 	return req, nil
 }
@@ -165,9 +213,13 @@ func (server *Server) sendResponse(cc codec.Codec, h *codec.Header, body interfa
 
 // handleRequest 处理请求
 func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup) {
-	// TODO: 应调用已注册的 rpc 方法以获得正确的replyv
+
 	defer wg.Done()
-	log.Println(req.h, req.argv.Elem())
-	req.replyv = reflect.ValueOf(fmt.Sprintf("minirpc resp %d", req.h.Seq))
+	err := req.svc.call(req.mtype, req.argv, req.replyv)
+	if err != nil {
+		req.h.Error = err.Error()
+		server.sendResponse(cc, req.h, invalidRequest, sending)
+		return
+	}
 	server.sendResponse(cc, req.h, req.replyv.Interface(), sending)
 }
