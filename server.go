@@ -7,12 +7,19 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"reflect"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/fanyeke/minirpc/codec"
+)
+
+const (
+	connected        = "200 Connected to Mini RPC"
+	defaultPRCPath   = "/_minirpc_"
+	defaultDebugPath = "/debug/minirpc"
 )
 
 // | Option{MagicNumber: xxx, CodecType: xxx} | Header{ServiceMethod ...} | Body interface{} |
@@ -254,4 +261,36 @@ func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.
 	case <-called:
 		<-sent
 	}
+}
+
+// ServeHTTP 实现了一个 http.Handler，用于响应 RPC 请求
+func (server *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	// minirpc http请求响应不需要很大的拓展性, rpc通信开始的时候执行, 只需要支持 "CONNECT" 即可
+	if req.Method != "CONNECT" {
+		// 向响应的头部加入指定的字符串
+		w.Header().Set("Connect-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = io.WriteString(w, "405 must CONNECT\n")
+		return
+	}
+	// Hijack 允许调用者接管连接
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		log.Print("rpc hijacking", req.RemoteAddr, ": ", err.Error())
+		return
+	}
+	// 写入信息
+	_, _ = io.WriteString(conn, "HTTP/1.0 "+connected+"\n\n")
+	server.ServerConn(conn)
+}
+
+// HandleHTTP 为 rpcPath 上的 RPC 消息注册 HTTP 处理程序
+func (server *Server) HandleHTTP() {
+	http.Handle(defaultPRCPath, server)
+	http.Handle(defaultDebugPath, debugHTTP{server})
+	log.Println("rpc server debug path:", defaultDebugPath)
+}
+
+func HandleHTTP() {
+	DefaultServer.HandleHTTP()
 }
