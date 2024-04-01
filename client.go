@@ -1,6 +1,7 @@
 package minirpc
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/fanyeke/minirpc/codec"
 )
@@ -188,27 +190,6 @@ func parseOption(opts ...*Option) (*Option, error) {
 	return opt, nil
 }
 
-// Dial 方便传入服务器地址
-func Dial(network, address string, opts ...*Option) (client *Client, err error) {
-	// 解析配置
-	opt, err := parseOption(opts...)
-	if err != nil {
-		return nil, err
-	}
-	// 与服务器进行链接
-	conn, err := net.Dial(network, address)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		// 链接建立未成功, 及时关闭链接
-		if client == nil {
-			_ = conn.Close()
-		}
-	}()
-	return NewClient(conn, opt)
-}
-
 // send 客户端发送请求, 传入参数是一个call
 func (client *Client) send(call *Call) {
 	client.sending.Lock()
@@ -253,7 +234,65 @@ func (client *Client) Go(serviceMethod string, args, reply interface{}, done cha
 }
 
 // Call 调用指定函数, 并等待其返回, 返回它的错误
-func (client *Client) Call(serverMethod string, args, reply interface{}) error {
-	call := <-client.Go(serverMethod, args, reply, make(chan *Call, 1)).Done
-	return call.Error
+func (client *Client) Call(ctx context.Context, serverMethod string, args, reply interface{}) error {
+	// Go 的目的是调用函数
+	call := client.Go(serverMethod, args, reply, make(chan *Call, 1))
+	// 通过context进行超时控制
+	select {
+	case <-ctx.Done():
+		client.removeCall(call.Seq)
+		return errors.New("rpc client: call failed: " + ctx.Err().Error())
+	case call := <-call.Done:
+		return call.Error
+	}
+}
+
+type clientResult struct {
+	client *Client
+	err    error
+}
+
+type newClientFunc func(conn net.Conn, opt *Option) (client *Client, err error)
+
+func dialTimeout(f newClientFunc, network, address string, opts ...*Option) (client *Client, err error) {
+	// 解析配置
+	opt, err := parseOption(opts...)
+	if err != nil {
+		return nil, err
+	}
+	// 带有超时的链接
+	conn, err := net.DialTimeout(network, address, opt.ConnectTimeout)
+	if err != nil {
+		return nil, err
+	}
+	// 及时关闭链接
+	defer func() {
+		if err != nil {
+			_ = conn.Close()
+		}
+	}()
+	// ? 为什么要创建这样一个channel
+	ch := make(chan clientResult)
+	go func() {
+		client, err := f(conn, opt)
+		ch <- clientResult{client: client, err: err}
+	}()
+	// 没有超时控制收不到数据就会一直阻塞
+	if opt.ConnectTimeout == 0 {
+		result := <-ch
+		return result.client, result.err
+	}
+	// 有超时空值,超时后会返回错误
+	// 不超时则正常返回
+	select {
+	case <-time.After(opt.ConnectTimeout):
+		return nil, fmt.Errorf("rpc client: connect timeout: expect within %s", opt.ConnectTimeout)
+	case result := <-ch:
+		return result.client, result.err
+	}
+}
+
+// Dial 方便传入服务器地址
+func Dial(network, address string, opts ...*Option) (client *Client, err error) {
+	return dialTimeout(NewClient, network, address, opts...)
 }

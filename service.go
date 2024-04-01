@@ -103,6 +103,7 @@ func isExportedOrBuiltinType(t reflect.Type) bool {
 	return ast.IsExported(t.Name()) || t.PkgPath() == ""
 }
 
+// call 调用指定方法
 func (s *service) call(m *methodType, argv, replyv reflect.Value) error {
 	// ? 调用次数+1
 	atomic.AddUint64(&m.numCalls, 1)

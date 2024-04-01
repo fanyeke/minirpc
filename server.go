@@ -3,12 +3,14 @@ package minirpc
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fanyeke/minirpc/codec"
 )
@@ -22,14 +24,17 @@ const MagicNumber = 0x3bef5c
 
 // Option 固定 JSON 编码, 用于定义之后的传输编码方式
 type Option struct {
-	MagicNumber int
-	CodecType   codec.Type
+	MagicNumber    int
+	CodecType      codec.Type
+	ConnectTimeout time.Duration // 建立链接超时
+	HandleTimeout  time.Duration // 请求处理超时
 }
 
 // DefaultOption 默认编码方式
 var DefaultOption = &Option{
-	MagicNumber: MagicNumber,
-	CodecType:   codec.GobType,
+	MagicNumber:    MagicNumber,
+	CodecType:      codec.GobType,
+	ConnectTimeout: 10 * time.Second, // 连接超时设置为10s
 }
 
 type Server struct {
@@ -126,14 +131,14 @@ func (server *Server) ServerConn(conn io.ReadWriteCloser) {
 		return
 	}
 
-	server.serverCodec(f(conn))
+	server.serverCodec(f(conn), &opt)
 }
 
 // invalidRequest 是发生错误时响应 argv 的占位符
 var invalidRequest = struct{}{}
 
 // serverCodec
-func (server *Server) serverCodec(cc codec.Codec) {
+func (server *Server) serverCodec(cc codec.Codec, opt *Option) {
 	sending := new(sync.Mutex) // 确保完整回复
 	wg := new(sync.WaitGroup)
 	for {
@@ -151,7 +156,7 @@ func (server *Server) serverCodec(cc codec.Codec) {
 		}
 		wg.Add(1)
 		// 处理请求
-		go server.handleRequest(cc, req, sending, wg)
+		go server.handleRequest(cc, req, sending, wg, opt.HandleTimeout)
 	}
 	wg.Wait()
 	_ = cc.Close()
@@ -212,14 +217,41 @@ func (server *Server) sendResponse(cc codec.Codec, h *codec.Header, body interfa
 }
 
 // handleRequest 处理请求
-func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup) {
+func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup, timeout time.Duration) {
 
 	defer wg.Done()
-	err := req.svc.call(req.mtype, req.argv, req.replyv)
-	if err != nil {
-		req.h.Error = err.Error()
-		server.sendResponse(cc, req.h, invalidRequest, sending)
+	// struct{}{} 类型的 channel 很明显就是为了传输信号
+	called := make(chan struct{})
+	sent := make(chan struct{})
+	go func() {
+		// 调用包含在请求字段的方法
+		err := req.svc.call(req.mtype, req.argv, req.replyv)
+		// 方法调用完毕, 通知 called
+		called <- struct{}{}
+		if err != nil {
+			// 出错误了, 把错误携带上
+			req.h.Error = err.Error()
+			// 响应请求
+			server.sendResponse(cc, req.h, invalidRequest, sending)
+			// 响应已经发送
+			sent <- struct{}{}
+			return
+		}
+		server.sendResponse(cc, req.h, req.replyv.Interface(), sending)
+		sent <- struct{}{}
+	}()
+	// 没有超时控制则一直阻塞等待, 直到请求处理完毕并且发送了响应
+	if timeout == 0 {
+		<-called
+		<-sent
 		return
 	}
-	server.sendResponse(cc, req.h, req.replyv.Interface(), sending)
+	// 有超时控制
+	select {
+	case <-time.After(timeout):
+		req.h.Error = fmt.Sprintf("rpc server: request timeout: expect within %s", timeout)
+		server.sendResponse(cc, req.h, invalidRequest, sending)
+	case <-called:
+		<-sent
+	}
 }
