@@ -94,8 +94,10 @@ func (s *service) registerMethods() {
 			ArgType:   argType,
 			ReplyType: replyType,
 		}
+		//fmt.Println(s.method[method.Name])
 		log.Printf("rpc server: register %s.%s\n", s.name, method.Name)
 	}
+
 }
 
 func isExportedOrBuiltinType(t reflect.Type) bool {

@@ -93,8 +93,8 @@ func broadcast(registry string) {
 }
 
 func main() {
-	log.SetFlags(0)
-	registryAddr := "http://localhost:9999/_geerpc_/registry"
+	//log.SetFlags(0)
+	registryAddr := "http://localhost:9999/_minirpc_/register"
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go startRegistry(&wg)

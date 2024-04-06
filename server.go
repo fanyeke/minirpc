@@ -31,8 +31,8 @@ const MagicNumber = 0x3bef5c
 
 // Option 固定 JSON 编码, 用于定义之后的传输编码方式
 type Option struct {
-	MagicNumber    int
-	CodecType      codec.Type
+	MagicNumber    int           // 标记是否为 rpc 请求
+	CodecType      codec.Type    // 编解码方式
 	ConnectTimeout time.Duration // 建立链接超时
 	HandleTimeout  time.Duration // 请求处理超时
 }
